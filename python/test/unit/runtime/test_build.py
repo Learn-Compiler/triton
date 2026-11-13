@@ -154,3 +154,72 @@ def test_amd_codegen_download_mirror(artifact, mirror, monkeypatch, tmp_path):
         "https://oaitriton.blob.core.windows.net/public/llvm-builds")
     assert downloads == [f"{base}/{name}.tar.gz"]
     assert result.read_bytes() == contents
+
+
+@pytest.fixture
+def coral_llvm_sdk(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3]))
+    import build_helpers
+
+    info = json.loads((Path(build_helpers.get_base_dir()) / "cmake/llvm-info.json").read_text())
+    prefix = tmp_path / "llvm"
+    header = prefix / "include/llvm/Support/VCSRevision.h"
+    header.parent.mkdir(parents=True)
+    header.write_text(f'#define LLVM_REVISION R"({info["llvm_hash"]})"\n')
+    return build_helpers, prefix, info
+
+
+@pytest.mark.parametrize("failure", [None, "revision", "version", "assertions", "rtti", "targets", "zvt"])
+def test_coral_llvm_sdk_validation(coral_llvm_sdk, monkeypatch, failure):
+    helpers, prefix, info = coral_llvm_sdk
+    if failure == "revision":
+        (prefix / "include/llvm/Support/VCSRevision.h").write_text('#define LLVM_REVISION "wrong"')
+    configuration = [info["version"], "ON", "NO", "X86 RISCV NVPTX AMDGPU"]
+    if failure in ["version", "assertions", "rtti", "targets"]:
+        configuration[["version", "assertions", "rtti", "targets"].index(failure)] = "wrong"
+    monkeypatch.setattr(helpers.subprocess, "check_output", lambda *args, **kwargs: "\n".join(configuration))
+    commands = []
+
+    def assemble(command, **kwargs):
+        commands.append((command, kwargs))
+        if failure == "zvt":
+            raise helpers.subprocess.CalledProcessError(1, command, stderr="Zvt instruction requires extension")
+
+    monkeypatch.setattr(helpers.subprocess, "run", assemble)
+    if failure is not None:
+        with pytest.raises(RuntimeError, match="Coral LLVM"):
+            helpers.verify_coral_llvm(prefix, info)
+    else:
+        helpers.verify_coral_llvm(prefix, info)
+        assert commands[0][0][0] == str(prefix / "bin/llvm-mc")
+        assert "+zvtbase" in commands[0][0][2]
+        assert "vtmms.tvv" in commands[0][1]["input"]
+
+
+def test_coral_llvm_requires_explicit_sdk(coral_llvm_sdk, monkeypatch):
+    helpers, _, info = coral_llvm_sdk
+    monkeypatch.delenv("LLVM_SYSPATH", raising=False)
+    with pytest.raises(RuntimeError, match="LLVM_SYSPATH"):
+        helpers.verify_coral_llvm(None, info)
+    with pytest.raises(RuntimeError, match="No Coral LLVM archive"):
+        helpers.get_llvm_archive("ubuntu-x64", info)
+    parser = argparse.ArgumentParser()
+    helpers.add_common_args(parser)
+    args = helpers.normalize_parsed_args(parser.parse_args(["--triton-cache-path", "/unused"]))
+    with pytest.raises(RuntimeError, match="LLVM_SYSPATH"):
+        helpers.get_llvm_package_info(args)
+
+
+@pytest.mark.parametrize("variable", ["LLVM_DIR", "MLIR_DIR", "LLD_DIR", "LLVM_LIBRARY_DIR", "LLVM_TABLEGEN_EXE"])
+def test_coral_llvm_rejects_mixed_cmake_paths(coral_llvm_sdk, monkeypatch, tmp_path, variable):
+    helpers, prefix, _ = coral_llvm_sdk
+    monkeypatch.setattr(helpers, "get_thirdparty_cmake_vars", lambda *args: {variable: str(prefix / "expected")})
+    generated = tmp_path / "paths.cmake"
+    helpers.write_thirdparty_cmake_vars(str(generated), ["llvm"], None)
+    # Matching paths must work; an explicit path into another SDK must fail.
+    for path, succeeds in [(prefix / "expected", True), (tmp_path / "old-llvm", False)]:
+        result = helpers.subprocess.run(
+            ["cmake", f"-D{variable}={path}", "-P", str(generated)], capture_output=True, text=True)
+        assert (result.returncode == 0) == succeeds
+        if not succeeds:
+            assert f"{variable} conflicts with pinned LLVM_SYSPATH" in result.stderr

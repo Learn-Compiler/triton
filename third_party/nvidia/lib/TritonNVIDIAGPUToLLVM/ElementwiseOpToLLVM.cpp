@@ -19,6 +19,28 @@ namespace mlir::triton {
 namespace gpu {
 namespace {
 
+struct NvidiaMulhiUIOpConversion
+    : public ElementwiseOpConversionBase<MulhiUIOp, NvidiaMulhiUIOpConversion> {
+  using Base =
+      ElementwiseOpConversionBase<MulhiUIOp, NvidiaMulhiUIOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(MulhiUIOp op, Adaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    unsigned bitWidth = elemTy.getIntOrFloatBitWidth();
+    assert(bitWidth == 32 || bitWidth == 64);
+    StringRef intrinsic =
+        bitWidth == 32 ? "llvm.nvvm.mulhi.ui" : "llvm.nvvm.mulhi.ull";
+    auto result = LLVM::CallIntrinsicOp::create(
+        rewriter, loc, elemTy, rewriter.getStringAttr(intrinsic),
+        ValueRange{operands[0][0], operands[0][1]});
+    return {result.getResult(0)};
+  }
+};
+
 // The caller has proved that every FP32 value is exactly representable in BF16.
 static SmallVector<Value>
 truncateExactFp32ToBf16(Location loc, ConversionPatternRewriter &rewriter,
@@ -833,10 +855,10 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   mlir::triton::populateElementwiseOpToLLVMPatterns(typeConverter, patterns,
                                                     axisInfoAnalysis, benefit);
 
-  // Preserve mul.hi selection when InstCombine turns input extensions into
-  // masks.
-  patterns.add<ElementwiseOpConversion<MulhiUIOp, LLVM::UMulHOp>>(
-      typeConverter, axisInfoAnalysis, benefit.getBenefit() + 1);
+  // Preserve mul.hi selection even on LLVM revisions without UMulHOp, and
+  // when InstCombine turns input extensions into masks.
+  patterns.add<NvidiaMulhiUIOpConversion>(typeConverter, axisInfoAnalysis,
+                                          benefit.getBenefit() + 1);
 
 #define POPULATE_OP(SRC_OP, DST_OP, ...)                                       \
   patterns.add<                                                                \

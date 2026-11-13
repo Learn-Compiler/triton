@@ -2,6 +2,12 @@
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
+LLVM_SOURCE_ONLY=$(jq -r '.source_only // false' "$REPO_ROOT/cmake/llvm-info.json") || exit 1
+if [ "$LLVM_SOURCE_ONLY" = "true" ]; then
+    echo "Coral requires its pinned LLVM source and Zvt patch; follow docs/coral-llvm.md." >&2
+    exit 1
+fi
+
 LLVM_TARGETS=${LLVM_TARGETS:-Native;NVPTX;AMDGPU}
 LLVM_PROJECTS=${LLVM_PROJECTS:-mlir;llvm;lld;clang}
 LLVM_DISTRIBUTION_COMPONENTS=${LLVM_DISTRIBUTION_COMPONENTS:-"llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports;clang;clang-resource-headers;FileCheck;not;split-file;llc;opt;llvm-config;mlir-tblgen;mlir-translate"}

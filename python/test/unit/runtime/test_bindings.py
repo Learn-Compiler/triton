@@ -27,6 +27,21 @@ def test_llvm_ir_to_bitcode_reports_invalid_ir():
         llvm.to_bitcode("invalid LLVM IR")
 
 
+def test_llvm_pass_plugin_missing_file(monkeypatch, tmp_path):
+    from triton._C.libtriton import ir, llvm
+
+    source = tmp_path / "plugin_input.mlir"
+    source.write_text("module { llvm.func @kernel() { llvm.return } }")
+    context = ir.context()
+    ir.load_dialects(context)
+    module = ir.parse_mlir_module(str(source), context)
+    llvm_context = llvm.context()
+    llvm_module = llvm.to_module(module, llvm_context)
+    monkeypatch.setenv("LLVM_PASS_PLUGIN_PATH", str(tmp_path / "missing_plugin.so"))
+    with pytest.raises(RuntimeError, match="Pass Plugin Error"):
+        llvm.optimize_module(llvm_module, llvm.OPTIMIZE_O3)
+
+
 @pytest.mark.parametrize("dtype", ["i8", "i16", "i32", "i64", "f16", "f32", "f64"])
 @pytest.mark.parametrize("num_elements", [2, 4])
 @pytest.mark.parametrize("enable_nvptx_tti", [False, True])

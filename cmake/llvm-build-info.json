@@ -1,5 +1,6 @@
 {
-  "llvm_hash": "18f9e623e4c891ba31ff817c07197707ac9bc593",
-  "repository": "llvm/llvm-project",
-  "build_number": 2
+  "llvm_hash": "6cce5bca3b901ec32e250fb43e88eb0fe511af93",
+  "repository": "iree-org/llvm-project",
+  "build_number": 1,
+  "source_only": true
 }

@@ -66,6 +66,15 @@ using namespace llvm;
 
 namespace {
 
+template <typename Plugin> auto loadPassPlugin(const std::string &path) {
+  // The spelling changed within LLVM 24, so the major version is insufficient
+  // to distinguish the two APIs.
+  if constexpr (requires { Plugin::load(path); })
+    return Plugin::load(path);
+  else
+    return Plugin::Load(path);
+}
+
 void enableFPContraction(llvm::Module &module) {
   for (llvm::Function &function : module)
     for (llvm::Instruction &instruction : llvm::instructions(function))
@@ -684,7 +693,7 @@ void init_triton_llvm(py::module_ &m) {
         if (!pluginFile.empty()) {
           // TODO: Add some logging here that we inserted a pass into the LLVM
           // pass pipeline
-          auto passPlugin = llvm::PassPlugin::load(pluginFile);
+          auto passPlugin = loadPassPlugin<llvm::PassPlugin>(pluginFile);
           if (!passPlugin) {
             llvm::Error Err = passPlugin.takeError();
             std::string ErrMsg =

@@ -370,11 +370,42 @@ def get_json_package_info():
     return Package("json", "", get_json_archive().url, "JSON_INCLUDE_DIR", "", "JSON_SYSPATH")
 
 
+def verify_coral_llvm(prefix, llvm_info):
+    """Reject a stock or incompatible SDK before configuring native code."""
+    if not prefix:
+        raise RuntimeError("Coral LLVM requires LLVM_SYSPATH; see docs/coral-llvm.md (no prebuilt SDK is published)")
+    prefix = Path(prefix).resolve()
+    try:
+        revision_header = (prefix / "include/llvm/Support/VCSRevision.h").read_text()
+        revision = re.search(r'#define LLVM_REVISION (?:R"\()?"?([0-9a-f]{40})', revision_header)
+        if revision is None or revision.group(1) != llvm_info["llvm_hash"]:
+            raise RuntimeError(f"Coral LLVM revision mismatch: expected {llvm_info['llvm_hash']} in {prefix}")
+        config = prefix / "bin/llvm-config"
+        actual = subprocess.check_output(
+            [str(config), "--version", "--assertion-mode", "--has-rtti", "--targets-built"], text=True).splitlines()
+        expected = [llvm_info["version"], llvm_info["assertions"], llvm_info["rtti"]]
+        if len(actual) != 4 or actual[:3] != expected or not set(llvm_info["required_targets"]) <= set(
+                actual[3].split()):
+            raise RuntimeError(f"Coral LLVM configuration mismatch in {prefix}: {actual}; see docs/coral-llvm.md")
+        features = ",".join("+" + feature for feature in llvm_info["zvt_features"])
+        # Exercise each pinned matrix feature. Stock LLVM with the same version
+        # string must not pass the check merely because its Git revision matches.
+        subprocess.run(
+            [str(prefix / "bin/llvm-mc"), "-triple=riscv32", f"-mattr={features}", "-filetype=obj", "-o", os.devnull],
+            input="msetmtype t5, t6\nvtzero mt0\nvtmms.tvv mt8, v4, v8\nvtfmm.tvv mt0, v4, v8\n", text=True,
+            capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "stderr", None) or str(error)
+        raise RuntimeError(f"Coral LLVM SDK validation failed in {prefix}: {detail}") from error
+
+
 def get_llvm_archive(system_suffix, llvm_info=None):
     if llvm_info is None:
         llvm_info_path = os.path.join(get_base_dir(), "cmake", "llvm-info.json")
         with open(llvm_info_path, "r") as llvm_info_file:
             llvm_info = json.load(llvm_info_file)
+    if llvm_info.get("source_only"):
+        raise RuntimeError("No Coral LLVM archive is published; set LLVM_SYSPATH (see docs/coral-llvm.md)")
     rev = llvm_info["llvm_hash"][:8]
     build_number = llvm_info["build_number"]
     filename = f"llvm-{rev}-{system_suffix}-{build_number}.tar.gz"
@@ -431,6 +462,12 @@ def get_llvm_system_suffix(helper_args: BuildHelperArgs):
 
 
 def get_llvm_package_info(helper_args: BuildHelperArgs):
+    with open(os.path.join(get_base_dir(), "cmake", "llvm-info.json")) as file:
+        llvm_info = json.load(file)
+    if llvm_info.get("source_only"):
+        verify_coral_llvm(helper_args.llvm_syspath, llvm_info)
+        return Package("llvm", "coral-" + llvm_info["llvm_hash"][:8], "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR",
+                       "LLVM_SYSPATH")
     system_suffix = get_llvm_system_suffix(helper_args)
     if system_suffix is None:
         return Package("llvm", "LLVM-C.lib", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
@@ -534,6 +571,19 @@ def get_thirdparty_cmake_vars(packages: list[str], helper_args: BuildHelperArgs)
     cmake_vars = {}
     for package_info in package_infos:
         cmake_vars.update(_get_thirdparty_package_cmake_vars(package_info, helper_args))
+    if "llvm" in packages:
+        with open(os.path.join(get_base_dir(), "cmake", "llvm-info.json")) as file:
+            if json.load(file).get("source_only"):
+                prefix = Path(helper_args.llvm_syspath).resolve()
+                # Pin package discovery and tablegen too: a stale CMake cache
+                # must not mix a valid LLVM_SYSPATH with another MLIR/LLVM SDK.
+                cmake_vars.update({
+                    "LLVM_DIR": str(prefix / "lib/cmake/llvm"),
+                    "MLIR_DIR": str(prefix / "lib/cmake/mlir"),
+                    "LLD_DIR": str(prefix / "lib/cmake/lld"),
+                    "LLVM_TABLEGEN_EXE": str(prefix / "bin/llvm-tblgen"),
+                    "MLIR_TABLEGEN_EXE": str(prefix / "bin/mlir-tblgen"),
+                })
     return cmake_vars
 
 
@@ -547,6 +597,15 @@ def write_thirdparty_cmake_vars(output: str, packages: list[str], helper_args: B
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as output_file:
         for key, value in sorted(cmake_vars.items()):
+            if key.startswith(("LLVM_", "MLIR_", "LLD_")):
+                output_file.write(f'if(DEFINED {key} AND NOT "${{{key}}}" STREQUAL "")\n')
+                output_file.write(f'  get_filename_component(_actual "${{{key}}}" REALPATH)\n')
+                output_file.write(f'  get_filename_component(_expected "{_cmake_escape(value)}" REALPATH)\n')
+                output_file.write('  if(NOT _actual STREQUAL _expected)\n')
+                output_file.write(
+                    f'    message(FATAL_ERROR "{key} conflicts with pinned LLVM_SYSPATH; use a fresh build directory")\n'
+                )
+                output_file.write('  endif()\nendif()\n')
             output_file.write(f'if(NOT DEFINED {key} OR "${{{key}}}" STREQUAL "")\n')
             output_file.write(f'  set({key} "{_cmake_escape(value)}")\n')
             output_file.write('endif()\n')
