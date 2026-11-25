@@ -33,6 +33,7 @@ struct FuncLowering : OpConversionPattern<tt::FuncOp> {
       return rewriter.notifyMatchFailure(op, "expected a public void kernel");
 
     const auto &converter = *getTypeConverter<LLVMTypeConverter>();
+    // The standard conversion rewrites the signature and moves the body.
     auto function = convertFuncOpToLLVMFuncOp(op, rewriter, converter);
 
     if (failed(function))
@@ -65,6 +66,8 @@ struct ConvertTritonCoralToLLVM
     LowerToLLVMOptions options(&context);
     options.dataLayout = llvm::DataLayout(coralDataLayout);
     LLVMTypeConverter converter(&context, options);
+    // This stage lowers global i32 pointers to opaque LLVM pointers
+    // in address space zero.
     converter.addConversion([](tt::PointerType type) -> std::optional<Type> {
       if (type.getAddressSpace() != tt::PtrAddrSpace::Global ||
           !type.getPointeeType().isInteger(32))
@@ -74,6 +77,7 @@ struct ConvertTritonCoralToLLVM
 
     LLVMConversionTarget target(context);
     target.addLegalOp<ModuleOp>();
+    // Full conversion reports any TTIR op that lacks a lowering pattern.
     target.addIllegalDialect<tt::TritonDialect>();
     RewritePatternSet patterns(&context);
     patterns.add<FuncLowering, ReturnLowering>(converter, &context);
@@ -83,6 +87,7 @@ struct ConvertTritonCoralToLLVM
       return;
     }
 
+    // Preserve the RV32 target and layout when exporting LLVM IR.
     StringAttr triple = StringAttr::get(&context, coralTriple);
     StringAttr layout = StringAttr::get(&context, coralDataLayout);
     module->setAttr(LLVM::LLVMDialect::getTargetTripleAttrName(), triple);

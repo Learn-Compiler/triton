@@ -93,8 +93,10 @@ class CoralBackend(BaseBackend):
     pm = ir.pass_manager(src.context)
     pm.enable_debug()
     coral.passes.add_to_llvmir(pm)
+    # 在同一个 MLIR module 中把 TTIR 操作降低到 LLVM 方言。
     pm.run(src, "coral_make_llir")
 
+    # 将 LLVM 方言翻译成 llc 可以读取的文本 LLVM IR。
     context = llvm.context()
     return str(llvm.to_module(src, context))
 
