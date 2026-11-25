@@ -18,6 +18,7 @@ class CoralOptions:
   num_warps: int = 1
   num_stages: int = 1
   debug: bool = False
+  sanitize_overflow: bool = False
 
   def hash(self):
     key = "_".join([f"{k}-{v}" for k, v in self.__dict__.items()])
@@ -28,7 +29,11 @@ class CoralBackend(BaseBackend):
 
   @staticmethod
   def supports_target(target: GPUTarget) -> bool:
-    return target.backend == "coral"
+    return (
+      target.backend == "coral"
+      and target.arch in ("coral-rv32", "rv32imf_zve32x")
+      and target.warp_size == 1
+    )
 
   def __init__(self, target: GPUTarget) -> None:
     super().__init__(target)
@@ -85,7 +90,13 @@ class CoralBackend(BaseBackend):
   @staticmethod
   def make_llir(src, metadata, options):
     '''阶段2: 降级到LLVM IR'''
-    return str(src)
+    pm = ir.pass_manager(src.context)
+    pm.enable_debug()
+    coral.passes.add_to_llvmir(pm)
+    pm.run(src, "coral_make_llir")
+
+    context = llvm.context()
+    return str(llvm.to_module(src, context))
 
 
   @staticmethod
