@@ -58,6 +58,54 @@ struct ReturnLowering : OpConversionPattern<tt::ReturnOp> {
   }
 };
 
+// 签名转换和访存pattern共用这条约束
+bool isGlobalI32Pointer(Type type) {
+  auto pointer = dyn_cast<tt::PointerType>(type);
+  return pointer && pointer.getAddressSpace() == tt::PtrAddrSpace::Global &&
+         pointer.getPointeeType().isInteger(32);
+}
+
+
+struct LoadLowering : OpConversionPattern<tt::LoadOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+    matchAndRewrite(tt::LoadOp op, OpAdaptor adaptor, 
+                    ConversionPatternRewriter &rewriter) const override {
+    if(!isGlobalI32Pointer(op.getPtr().getType()))
+      return rewriter.notifyMatchFailure(op, "expected a global scalar i32 pointer");
+    if(op.getMask() || op.getOther() || op.getCachePolicy() || op.getIsVolatile()) 
+      return rewriter.notifyMatchFailure(op, "unsupported Coral scalar load options");
+    
+    // 用转换后的指针读取i32. 地址只保证1字节对齐。
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(
+      op, op.getResult().getType(), adaptor.getPtr(), /*aligment*/1
+    );
+    return success();
+  }
+};
+
+
+struct StoreLowering : OpConversionPattern<tt::StoreOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult 
+  matchAndRewrite(tt::StoreOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+    if(!isGlobalI32Pointer(op.getPtr().getType()))
+      return rewriter.notifyMatchFailure(op, "expected a global scalar i32 pointer");
+    if(op.getMask() || op.getCachePolicy() || op.getIgnoreCta())
+      return rewriter.notifyMatchFailure(op, "unsupported Coral scalar store options");
+    
+    // adaptor 中的值和地址以及重映射， store接到改写后的load结果
+    rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
+      op, adaptor.getValue(), adaptor.getPtr(), /*alignment=*/1
+    );
+    return success();
+  }
+};
+
+
 struct ConvertTritonCoralToLLVM
     : impl::ConvertTritonCoralToLLVMBase<ConvertTritonCoralToLLVM> {
   void runOnOperation() override {
@@ -80,7 +128,7 @@ struct ConvertTritonCoralToLLVM
     // Full conversion reports any TTIR op that lacks a lowering pattern.
     target.addIllegalDialect<tt::TritonDialect>();
     RewritePatternSet patterns(&context);
-    patterns.add<FuncLowering, ReturnLowering>(converter, &context);
+    patterns.add<FuncLowering, ReturnLowering, LoadLowering, StoreLowering>(converter, &context);
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
@@ -94,6 +142,7 @@ struct ConvertTritonCoralToLLVM
     module->setAttr(LLVM::LLVMDialect::getDataLayoutAttrName(), layout);
   }
 };
+
 
 } // namespace
 
