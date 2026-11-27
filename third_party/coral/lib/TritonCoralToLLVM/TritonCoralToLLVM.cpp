@@ -4,6 +4,8 @@
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/LoweringOptions.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -111,6 +113,31 @@ struct ConvertTritonCoralToLLVM
   void runOnOperation() override {
     MLIRContext &context = getContext();
     ModuleOp module = getOperation();
+
+    // 标准转换库认识减法、浮点和额外类型， 只开放标量i32常量和无溢出承诺的加法
+    // 先约束本节开放的Arith子集，再交给标准转换库
+    WalkResult arithmetic = module.walk([](Operation *op) {
+      if(op->getName().getDialectNamespace() != arith::ArithDialect::getDialectNamespace())
+        return WalkResult::advance();
+      if(auto constant = dyn_cast<arith::ConstantOp>(op)) {
+        if(constant.getType().isInteger(32))
+          return WalkResult::advance();
+      }
+
+      // 普通i32加法保留回绕语义，检查原操作的溢出标志
+      if(auto add = dyn_cast<arith::AddIOp>(op)) {
+        if(add.getType().isInteger(32) && 
+           add.getOverflowFlags() == arith::IntegerOverflowFlags::none) 
+          return WalkResult::advance();
+      }
+      op->emitOpError("Coral scalar arithmetic support i32 constant and unflagged addi");
+      return WalkResult::advance();
+    });
+    if(arithmetic.wasInterrupted()) {
+      signalPassFailure();
+      return;
+    }
+
     LowerToLLVMOptions options(&context);
     options.dataLayout = llvm::DataLayout(coralDataLayout);
     LLVMTypeConverter converter(&context, options);
@@ -129,6 +156,9 @@ struct ConvertTritonCoralToLLVM
     target.addIllegalDialect<tt::TritonDialect>();
     RewritePatternSet patterns(&context);
     patterns.add<FuncLowering, ReturnLowering, LoadLowering, StoreLowering>(converter, &context);
+    target.addIllegalDialect<arith::ArithDialect>();
+    // 注册已有Atirth pattern, 将通过检查的常量和加法改写为LLVM操作
+    arith::populateArithToLLVMConversionPatterns(converter, patterns);
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
